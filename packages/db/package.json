@@ -1,0 +1,26 @@
+{
+  "name": "@callsheet/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./types": "./types.ts"
+  },
+  "scripts": {
+    "generate": "prisma generate",
+    "validate": "prisma validate",
+    "migrate": "prisma migrate dev",
+    "typecheck": "prisma generate && tsc --noEmit"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "1.1.0",
+    "@prisma/adapter-neon": "7.10.0",
+    "@prisma/client": "7.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "prisma": "7.10.0",
+    "typescript": "^5"
+  }
+}

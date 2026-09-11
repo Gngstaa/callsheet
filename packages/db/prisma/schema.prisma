@@ -1,0 +1,251 @@
+// Callsheet data model. SPEC.md, "Domain model", is the source of truth.
+// Timestamps are timestamptz (UTC). Calendar dates are `date` and mean a day
+// in America/New_York.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Industry {
+  CONSTRUCTION
+  ARCHITECTURE_ENGINEERING
+  HEALTHCARE
+  INSURANCE
+  SAAS_STARTUPS
+  BACK_OFFICE_OPERATIONS
+  ECOMMERCE_RETAIL
+  LEGAL_PROFESSIONAL_SERVICES
+}
+
+enum Location {
+  PUNE
+  RAJKOT
+  MANILA
+}
+
+enum PlacementStatus {
+  ACTIVE
+  ENDED
+  REPLACED
+}
+
+enum Party {
+  CLIENT
+  PROFESSIONAL
+}
+
+enum IssueType {
+  CLIENT_COMPLAINT
+  UNDERPERFORMANCE
+  ATTENDANCE
+  REPLACEMENT_REQUEST
+}
+
+enum IssueSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum Reporter {
+  CLIENT
+  PROFESSIONAL
+  F5
+}
+
+enum IssueStatus {
+  OPEN
+  FIXED
+  CLOSED
+  REGRESSED
+}
+
+enum FollowUpOutcome {
+  HELD
+  REGRESSED
+}
+
+enum ActionType {
+  ESCALATION
+  SILENCE
+  ISSUE_FOLLOWUP
+  FEEDBACK_DUE
+  NEW_PLACEMENT
+  CHECKIN_DUE
+}
+
+enum HealthStatus {
+  RED
+  AMBER
+  GREEN
+}
+
+enum EscalationRole {
+  ACCOUNT_DIRECTOR
+  DELIVERY_MANAGER
+}
+
+enum EscalationRule {
+  TWO_OPEN_ISSUES
+  TRIAL_CLIENT_COMPLAINT
+  REPEAT_ATTENDANCE
+  RED_SEVEN_DAYS
+  REPLACEMENT_REQUEST
+  REGRESSED_FOLLOW_UP
+}
+
+model Client {
+  id              String      @id @default(cuid())
+  name            String
+  industry        Industry
+  timezone        String
+  contactName     String
+  contactEmail    String
+  startedWithF5At DateTime    @db.Date
+  placements      Placement[]
+}
+
+model Professional {
+  id         String      @id @default(cuid())
+  name       String
+  role       String
+  location   Location
+  joinedF5At DateTime    @db.Date
+  placements Placement[]
+}
+
+model Placement {
+  id             String          @id @default(cuid())
+  clientId       String
+  professionalId String
+  startDate      DateTime        @db.Date
+  endDate        DateTime?       @db.Date
+  status         PlacementStatus @default(ACTIVE)
+  weeklyRateUsd  Decimal         @db.Decimal(10, 2)
+
+  client          Client           @relation(fields: [clientId], references: [id])
+  professional    Professional     @relation(fields: [professionalId], references: [id])
+  feedbackEntries FeedbackEntry[]
+  issues          Issue[]
+  checkIns        CheckIn[]
+  actionLogs      ActionLog[]
+  escalations     Escalation[]
+  healthSnapshots HealthSnapshot[]
+
+  @@index([status])
+  @@index([clientId])
+  @@index([professionalId])
+}
+
+model FeedbackEntry {
+  id          String   @id @default(cuid())
+  placementId String
+  party       Party
+  collectedAt DateTime @db.Timestamptz(3)
+  /// 1 to 5. Checked in the repository; Prisma has no check constraints.
+  sentiment   Int
+  note        String?
+
+  placement Placement @relation(fields: [placementId], references: [id], onDelete: Cascade)
+
+  @@index([placementId, party, collectedAt])
+}
+
+model Issue {
+  id          String        @id @default(cuid())
+  placementId String
+  type        IssueType
+  severity    IssueSeverity
+  reportedAt  DateTime      @db.Timestamptz(3)
+  reportedBy  Reporter
+  summary     String
+  status      IssueStatus   @default(OPEN)
+  fixedAt     DateTime?     @db.Timestamptz(3)
+
+  placement   Placement       @relation(fields: [placementId], references: [id], onDelete: Cascade)
+  followUps   IssueFollowUp[]
+  escalations Escalation[]
+
+  @@index([placementId, status])
+}
+
+model IssueFollowUp {
+  id         String           @id @default(cuid())
+  issueId    String
+  /// 7, 21 or 45, counted from Issue.fixedAt.
+  offsetDays Int
+  dueAt      DateTime         @db.Timestamptz(3)
+  checkedAt  DateTime?        @db.Timestamptz(3)
+  outcome    FollowUpOutcome?
+
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@unique([issueId, offsetDays])
+}
+
+model CheckIn {
+  id          String    @id @default(cuid())
+  placementId String
+  party       Party
+  dueOn       DateTime  @db.Date
+  completedAt DateTime? @db.Timestamptz(3)
+
+  placement Placement @relation(fields: [placementId], references: [id], onDelete: Cascade)
+
+  @@unique([placementId, party, dueOn])
+}
+
+model ActionLog {
+  id          String     @id @default(cuid())
+  placementId String
+  actionType  ActionType
+  performedAt DateTime   @db.Timestamptz(3)
+  note        String?
+
+  placement Placement @relation(fields: [placementId], references: [id], onDelete: Cascade)
+
+  @@index([placementId, performedAt])
+}
+
+model EscalationContact {
+  id          String         @id @default(cuid())
+  name        String
+  /// One person per role. Rules route to a role, the role names the person.
+  role        EscalationRole @unique
+  escalations Escalation[]
+}
+
+model Escalation {
+  id          String         @id @default(cuid())
+  placementId String
+  /// Set for rules about one issue; null for placement-wide rules.
+  issueId     String?
+  rule        EscalationRule
+  contactId   String
+  reason      String
+  escalatedAt DateTime       @db.Timestamptz(3)
+
+  placement Placement         @relation(fields: [placementId], references: [id], onDelete: Cascade)
+  issue     Issue?            @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  contact   EscalationContact @relation(fields: [contactId], references: [id])
+
+  @@index([placementId, rule])
+}
+
+model HealthSnapshot {
+  id          String       @id @default(cuid())
+  placementId String
+  /// America/New_York calendar day.
+  day         DateTime     @db.Date
+  status      HealthStatus
+  score       Int
+
+  placement Placement @relation(fields: [placementId], references: [id], onDelete: Cascade)
+
+  @@unique([placementId, day])
+}
