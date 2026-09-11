@@ -191,9 +191,9 @@ the first screen is server-rendered with data in the HTML.
 
 ## Motion
 
-One moment, and it belongs to the user: logging feedback collapses the row
-out over 180ms and decrements the group count. That is the whole motion
-budget.
+One moment, and it belongs to the user: logging from a row confirms in
+place, holds for 900ms, then collapses the row out over 180ms and decrements
+the group count as it goes. That is the whole motion budget.
 
 No entrance animations. No fade-and-slide-up on sections. No hover
 transitions — there is no hover on a phone. Respect

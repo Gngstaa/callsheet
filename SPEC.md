@@ -364,12 +364,30 @@ this week rows carry none. A group with nothing in it is not shown. The page
 renders per request, so the date and the list are always today's.
 
 ### Logging from a row
-Each row's one action works in place. The moment it is logged the row
-collapses out and its group count drops. The server then re-reads and
-re-scores only that placement and sends its rows back, and the list swaps
-them in without a reload — the other placements have not changed, so the
-Today query is not run again. Reset and load demo data change everything, so
-they render the whole page again.
+Each row's one action works in place, and says what it is doing in the row
+itself — no toast, which would need its own layer, land away from the thumb,
+and could not say which row it meant with two in flight.
+
+- **Pending.** While the write is in flight the row stays put, dims slightly,
+  and its action area says what is happening: "Saving rating…",
+  "Recording follow-up…", "Logging check-in…", "Escalating…". No spinner.
+- **Confirmed.** On success the row's content is replaced, at the same
+  height, by a short confirmation in steady green that says what was
+  recorded: "Rated 4. Logged for Rhea Manalo.", "Follow-up recorded — still
+  holding.", "Check-in logged.", "Escalated to Vikram Iyer.". It holds for
+  900ms, then the row collapses out over 180ms and its group count drops as
+  the collapse starts. With reduced motion the row is removed without
+  collapsing once the confirmation has held.
+- **Failed.** The row returns to normal with a plain message in alert and
+  its action still available. A row whose write failed never collapses.
+
+There is no undo.
+
+The server re-reads and re-scores only the touched placement and sends its
+rows back; the list swaps them in once the row has gone, without a reload.
+The other placements have not changed, so the Today query is not run again.
+Reset and load demo data change everything, so they render the whole page
+again.
 
 - **Log feedback** — tap it, then tap a rating from 1 to 5. Two taps. It is
   recorded as the client's feedback. This is the most frequent action in the

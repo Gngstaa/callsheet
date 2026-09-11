@@ -23,8 +23,14 @@ import { emptyPlacementRows, placementRows, type PlacementRows } from "@/lib/tod
 
 export type ActionResult = { ok: true } | { ok: false; message: string };
 
-/** A row action returns the touched placement's rows, for the list to swap in. */
-export type RowActionResult = { ok: true; rows: PlacementRows } | { ok: false; message: string };
+/**
+ * A row action returns the touched placement's rows, for the list to swap in,
+ * a sentence saying what was recorded, and when the rows were read, so the
+ * newest read wins if two answers for one placement cross.
+ */
+export type RowActionResult =
+  | { ok: true; rows: PlacementRows; confirmation: string; readAt: number }
+  | { ok: false; message: string };
 
 /** A failure the person can act on. Its message is shown as written. */
 class ActionError extends Error {}
@@ -73,8 +79,15 @@ function rowsFor(
   return placementRows(placement, score);
 }
 
-/** Writes, then re-reads just the touched placement. `write` returns that placement's id. */
-async function rowAction(label: string, write: () => Promise<string>): Promise<RowActionResult> {
+/**
+ * Writes, then re-reads just the touched placement. `write` returns that
+ * placement's id; `confirmation` says what was recorded.
+ */
+async function rowAction(
+  label: string,
+  write: () => Promise<string>,
+  confirmation: (placement: HydratedPlacement | null) => string,
+): Promise<RowActionResult> {
   timingNote(`action: ${label} started`);
   // The contacts do not depend on the write, so fetch them alongside it.
   const contacts = escalationContactRepository.list();
@@ -88,10 +101,16 @@ async function rowAction(label: string, write: () => Promise<string>): Promise<R
   }
 
   try {
+    const readAt = Date.now();
     const [placement, loadedContacts] = await timed(`action: ${label}: re-read placement`, () =>
       Promise.all([placementRepository.findHydratedById(placementId), contacts]),
     );
-    return { ok: true, rows: rowsFor(placementId, placement, loadedContacts, new Date()) };
+    return {
+      ok: true,
+      rows: rowsFor(placementId, placement, loadedContacts, new Date()),
+      confirmation: confirmation(placement),
+      readAt,
+    };
   } catch (error) {
     return failed(`${label} (refresh)`, error, SAVED_NOT_SHOWN);
   }
@@ -101,28 +120,41 @@ export async function logFeedback(placementId: string, sentiment: number): Promi
   if (!isId(placementId) || !Number.isInteger(sentiment) || sentiment < 1 || sentiment > 5) {
     return { ok: false, message: "Pick a rating from 1 to 5." };
   }
-  return rowAction("Logging feedback", async () => {
-    const entry = await feedbackRepository.log({ placementId, party: "CLIENT", sentiment, collectedAt: new Date() });
-    return entry.placementId;
-  });
+  return rowAction(
+    "Logging feedback",
+    async () => {
+      const entry = await feedbackRepository.log({ placementId, party: "CLIENT", sentiment, collectedAt: new Date() });
+      return entry.placementId;
+    },
+    (placement) =>
+      placement ? `Rated ${sentiment}. Logged for ${placement.professional.name}.` : `Rated ${sentiment}.`,
+  );
 }
 
 export async function logFollowUp(followUpId: string, outcome: "HELD" | "REGRESSED"): Promise<RowActionResult> {
   if (!isId(followUpId) || (outcome !== "HELD" && outcome !== "REGRESSED")) {
     return { ok: false, message: "Say whether the fix is holding." };
   }
-  return rowAction("Logging a follow-up", async () => {
-    const followUp = await issueRepository.recordFollowUpOutcome(followUpId, outcome, new Date());
-    return followUp.issue.placementId;
-  });
+  return rowAction(
+    "Logging a follow-up",
+    async () => {
+      const followUp = await issueRepository.recordFollowUpOutcome(followUpId, outcome, new Date());
+      return followUp.issue.placementId;
+    },
+    () => (outcome === "HELD" ? "Follow-up recorded — still holding." : "Follow-up recorded — came back."),
+  );
 }
 
 export async function logCheckIn(checkInId: string): Promise<RowActionResult> {
   if (!isId(checkInId)) return { ok: false, message: SAVE_FAILED };
-  return rowAction("Logging a check-in", async () => {
-    const checkIn = await checkInRepository.complete(checkInId, new Date());
-    return checkIn.placementId;
-  });
+  return rowAction(
+    "Logging a check-in",
+    async () => {
+      const checkIn = await checkInRepository.complete(checkInId, new Date());
+      return checkIn.placementId;
+    },
+    () => "Check-in logged.",
+  );
 }
 
 /**
@@ -144,6 +176,7 @@ export async function markEscalated(
   timingNote(`action: ${label} started`);
 
   try {
+    const readAt = Date.now();
     const [placement, contacts] = await timed(`action: ${label}: read placement`, () =>
       Promise.all([placementRepository.findHydratedById(placementId), escalationContactRepository.list()]),
     );
@@ -153,7 +186,14 @@ export async function markEscalated(
     const pending = scorePlacement(placement, { referenceDate: now, contacts }).actions.find(
       (action) => action.escalation?.rule === rule && action.issueId === issueId,
     );
-    if (!pending?.escalation) return { ok: true, rows: rowsFor(placementId, placement, contacts, now) };
+    if (!pending?.escalation) {
+      return {
+        ok: true,
+        rows: rowsFor(placementId, placement, contacts, now),
+        confirmation: "Already escalated.",
+        readAt,
+      };
+    }
 
     const { contact, role } = pending.escalation;
     if (!contact) {
@@ -172,6 +212,8 @@ export async function markEscalated(
     return {
       ok: true,
       rows: rowsFor(placementId, { ...placement, escalations: [...placement.escalations, escalation] }, contacts, now),
+      confirmation: `Escalated to ${contact.name}.`,
+      readAt,
     };
   } catch (error) {
     return failed(label, error, SAVE_FAILED);

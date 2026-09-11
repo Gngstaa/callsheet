@@ -1,15 +1,29 @@
 "use client";
 
-// Client component so a logged row leaves the list, and its group count
-// drops, the moment the action starts; when the server answers, the touched
-// placement's rows are swapped in without re-rendering the page.
+// Client component: a logged row shows that it is saving, then what
+// happened, then folds away; only then are the touched placement's new rows
+// swapped in, without re-rendering the page.
 
-import { useMemo, useOptimistic, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef } from "react";
 
+import type { RowActionResult } from "@/app/actions";
 import { CollapsedTodayGroup, TodayGroup } from "@/components/today-group";
-import { todayGroups, withPlacementRows, type PlacementRows, type TodayView } from "@/lib/today-view";
+import {
+  COLLAPSE_MS,
+  CONFIRMATION_HOLD_MS,
+  initialTodayState,
+  isLeaving,
+  todayReducer,
+} from "@/lib/row-phases";
+import { todayGroups, type RowView, type TodayView } from "@/lib/today-view";
 
-const NOTHING_LEAVING: ReadonlySet<string> = new Set();
+const LOST_CONNECTION = "Couldn't save that. Check the connection and try again.";
+
+export type RunRowAction = (
+  row: RowView,
+  pendingNote: string,
+  save: () => Promise<RowActionResult>,
+) => Promise<RowActionResult>;
 
 function ClearState({ nextUp }: { nextUp: string }) {
   return (
@@ -24,29 +38,64 @@ function ClearState({ nextUp }: { nextUp: string }) {
 }
 
 export function TodayList({ initialView }: { initialView: TodayView }) {
-  const [view, setView] = useState(initialView);
-  const [leaving, markLeaving] = useOptimistic<ReadonlySet<string>, string>(
-    NOTHING_LEAVING,
-    (current, rowKey) => new Set([...current, rowKey]),
-  );
-  const groups = useMemo(() => todayGroups(view), [view]);
+  const [state, dispatch] = useReducer(todayReducer, initialView, initialTodayState);
+  const groups = useMemo(() => todayGroups(state.view), [state.view]);
 
-  const applyRows = (rows: PlacementRows) => setView((current) => withPlacementRows(current, rows));
-  const handlers = { leaving, onLeave: markLeaving, onSaved: applyRows };
+  const timers = useRef(new Set<number>());
+  useEffect(() => {
+    const pending = timers.current;
+    return () => pending.forEach((id) => window.clearTimeout(id));
+  }, []);
 
-  const dueToday = [...groups.escalateNow, ...groups.callToday].filter((row) => !leaving.has(row.key));
+  function later(ms: number, then: () => void) {
+    const id = window.setTimeout(() => {
+      timers.current.delete(id);
+      then();
+    }, ms);
+    timers.current.add(id);
+  }
+
+  const run: RunRowAction = async (row, pendingNote, save) => {
+    dispatch({ type: "pending", key: row.key, placementId: row.placementId, note: pendingNote });
+
+    let result: RowActionResult;
+    try {
+      result = await save();
+    } catch {
+      result = { ok: false, message: LOST_CONNECTION };
+    }
+    if (!result.ok) {
+      dispatch({ type: "failed", key: row.key });
+      return result;
+    }
+
+    dispatch({ type: "confirmed", key: row.key, note: result.confirmation, rows: result.rows, readAt: result.readAt });
+    later(CONFIRMATION_HOLD_MS, () => {
+      // Reduced motion: no collapse, the row goes straight away.
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        dispatch({ type: "gone", key: row.key });
+        return;
+      }
+      dispatch({ type: "collapsing", key: row.key });
+      later(COLLAPSE_MS, () => dispatch({ type: "gone", key: row.key }));
+    });
+    return result;
+  };
+
+  const shared = { phases: state.phases, onRun: run };
+  const dueToday = [...groups.escalateNow, ...groups.callToday].filter((r) => !isLeaving(state.phases[r.key]));
 
   return (
     <>
       {dueToday.length === 0 && <ClearState nextUp={groups.nextUp} />}
       {groups.escalateNow.length > 0 && (
-        <TodayGroup id="escalate-now" label="Escalate now" rows={groups.escalateNow} {...handlers} />
+        <TodayGroup id="escalate-now" label="Escalate now" rows={groups.escalateNow} {...shared} />
       )}
       {groups.callToday.length > 0 && (
-        <TodayGroup id="call-today" label="Call today" rows={groups.callToday} {...handlers} />
+        <TodayGroup id="call-today" label="Call today" rows={groups.callToday} {...shared} />
       )}
       {groups.laterThisWeek.length > 0 && (
-        <CollapsedTodayGroup id="later-this-week" label="Later this week" rows={groups.laterThisWeek} {...handlers} />
+        <CollapsedTodayGroup id="later-this-week" label="Later this week" rows={groups.laterThisWeek} {...shared} />
       )}
     </>
   );
