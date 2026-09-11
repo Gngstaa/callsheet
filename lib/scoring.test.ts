@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 
 import type {
-  ActionType,
   EscalationContact,
   HydratedPlacement,
   IssueStatus,
@@ -14,6 +13,7 @@ import {
   compareActions,
   operationalDay,
   scorePlacement,
+  type ActionType,
   type PlacementScore,
   type ScoredAction,
   type ScoringContact,
@@ -57,7 +57,6 @@ function placement(overrides: Partial<ScoringPlacement> = {}): ScoringPlacement 
     feedbackEntries: [clientFeedback(-3)],
     issues: [],
     checkIns: [],
-    actionLogs: [],
     escalations: [],
     healthSnapshots: [],
     ...overrides,
@@ -210,18 +209,6 @@ describe("silence", () => {
     const unhappy = score(placement({ feedbackEntries: [clientFeedback(-1, 2)] }));
     expect(silent.score).toBeGreaterThan(unhappy.score);
   });
-
-  it("clears for the rest of the day once a call is logged", () => {
-    const logged = (offset: number) =>
-      score(
-        placement({
-          feedbackEntries: [clientFeedback(-40)],
-          actionLogs: [{ actionType: "SILENCE", performedAt: at(offset) }],
-        }),
-      );
-    expect(logged(0).actions).toEqual([]);
-    expect(only(logged(-1), "SILENCE").score).toBe(20);
-  });
 });
 
 describe("new placements", () => {
@@ -306,7 +293,9 @@ describe("issue follow-ups", () => {
     [3, 20],
     [4, 35],
   ])("%i days overdue adds %i", (overdue, points) => {
-    expect(only(score(fixedIssue(overdue)), "ISSUE_FOLLOWUP").score).toBe(points);
+    const action = only(score(fixedIssue(overdue)), "ISSUE_FOLLOWUP");
+    expect(action.score).toBe(points);
+    expect(action.daysOverdue).toBe(overdue);
   });
 
   it("asks the client contact whether the fix is holding", () => {
@@ -318,8 +307,12 @@ describe("issue follow-ups", () => {
     );
   });
 
-  it("asks the professional when the professional reported the issue", () => {
-    expect(only(score(fixedIssue(0, "PROFESSIONAL")), "ISSUE_FOLLOWUP").callee).toBe("Aniket Kulkarni");
+  it("goes to the professional who reported the issue, without repeating the name", () => {
+    const action = only(score(fixedIssue(0, "PROFESSIONAL")), "ISSUE_FOLLOWUP");
+    expect(action.callee).toBe("Aniket Kulkarni");
+    expect(action.reason).toBe(
+      "Check that the attendance issue is still resolved. The 7-day check is due today.",
+    );
   });
 
   it("ignores windows not yet due or already checked", () => {
@@ -346,8 +339,14 @@ describe("check-ins", () => {
   const withCheckIn = (overdue: number, party: "CLIENT" | "PROFESSIONAL" = "CLIENT") =>
     score(placement({ checkIns: [{ id: "check-in-1", party, dueOn: date(-overdue), completedAt: null }] }));
 
-  it("waits until the day after the due day", () => {
-    expect(withCheckIn(0).actions).toEqual([]);
+  it("makes a check-in due today a call, with no points of its own", () => {
+    const result = withCheckIn(0);
+    const action = only(result, "CHECKIN_DUE");
+    expect(action.reason).toBe("Monthly check-in with Dana Whitfield is due today.");
+    expect(action.daysOverdue).toBe(0);
+    expect(action.score).toBe(0);
+    expect(result.components).toEqual([]);
+    expect(result.health).toBe("GREEN");
   });
 
   it.each([
@@ -358,10 +357,96 @@ describe("check-ins", () => {
     expect(only(withCheckIn(overdue), "CHECKIN_DUE").score).toBe(points);
   });
 
-  it("names the professional for a professional check-in", () => {
-    expect(only(withCheckIn(7, "PROFESSIONAL"), "CHECKIN_DUE").reason).toBe(
-      "Monthly check-in with Aniket Kulkarni is 7 days overdue.",
+  it("does not repeat the professional's name for a professional check-in", () => {
+    const action = only(withCheckIn(7, "PROFESSIONAL"), "CHECKIN_DUE");
+    expect(action.callee).toBe("Aniket Kulkarni");
+    expect(action.reason).toBe("Monthly check-in is 7 days overdue.");
+  });
+});
+
+describe("coming up", () => {
+  it("says when client feedback falls due next", () => {
+    const [item] = score(placement()).upcoming;
+    expect(item).toMatchObject({
+      type: "FEEDBACK_DUE",
+      daysAway: 27,
+      when: "on 7 October",
+      what: "feedback",
+      callee: "Dana Whitfield",
+      reason: "Feedback from Dana Whitfield is due on 7 October.",
+    });
+  });
+
+  it.each([
+    [29, 1, "tomorrow"],
+    [28, 2, "Saturday"],
+    [24, 6, "Wednesday"],
+    [23, 7, "on 17 September"],
+  ])("with feedback %i days ago, is %i days away: %s", (daysAgo, daysAway, when) => {
+    const [item] = score(placement({ feedbackEntries: [clientFeedback(-daysAgo)] })).upcoming;
+    expect(item).toMatchObject({ daysAway, when });
+  });
+
+  it("judges the cadence on the day in question, which loosens after day 30", () => {
+    // Day 28, feedback 3 days ago. From day 31 feedback is due every 14 days,
+    // so the next due day is day 39, not day 32.
+    const [item] = score(placement({ ...onDay(28), feedbackEntries: [clientFeedback(-3)] })).upcoming;
+    expect(item.daysAway).toBe(11);
+  });
+
+  it("lists no feedback for a placement where feedback is already due or late", () => {
+    const result = score(placement({ feedbackEntries: [clientFeedback(-30)] }));
+    expect(result.actions.map((action) => action.type)).toEqual(["FEEDBACK_DUE"]);
+    expect(result.upcoming.map((item) => item.type)).not.toContain("FEEDBACK_DUE");
+  });
+
+  it("expects first feedback the day after the start", () => {
+    const [item] = score(placement({ ...onDay(0), feedbackEntries: [] })).upcoming;
+    expect(item).toMatchObject({ type: "FEEDBACK_DUE", daysAway: 1, when: "tomorrow" });
+  });
+
+  it("lists check-ins and follow-up checks from tomorrow, soonest first", () => {
+    const result = score(
+      placement({
+        issues: [
+          issue({
+            id: "issue-1",
+            type: "ATTENDANCE",
+            status: "FIXED",
+            reportedBy: "PROFESSIONAL",
+            followUps: [{ id: "follow-up-21", offsetDays: 21, dueAt: at(3), checkedAt: null, outcome: null }],
+          }),
+        ],
+        checkIns: [
+          { id: "check-in-client", party: "CLIENT", dueOn: date(0), completedAt: null },
+          { id: "check-in-professional", party: "PROFESSIONAL", dueOn: date(2), completedAt: null },
+        ],
+      }),
     );
+    expect(result.actions.map((action) => action.reason)).toEqual([
+      "Monthly check-in with Dana Whitfield is due today.",
+    ]);
+    expect(result.upcoming.map((item) => [item.what, item.when, item.reason])).toEqual([
+      ["check-in", "Saturday", "Monthly check-in is due Saturday."],
+      [
+        "21-day follow-up",
+        "Sunday",
+        "Check that the attendance issue is still resolved. The 21-day check is due Sunday.",
+      ],
+      ["feedback", "on 7 October", "Feedback from Dana Whitfield is due on 7 October."],
+    ]);
+    expect(result.upcoming.every((item) => item.daysAway >= 1)).toBe(true);
+  });
+
+  it("looks no further than 45 days", () => {
+    const result = score(
+      placement({ checkIns: [{ id: "check-in-far", party: "CLIENT", dueOn: date(46), completedAt: null }] }),
+    );
+    expect(result.upcoming.map((item) => item.checkInId)).not.toContain("check-in-far");
+  });
+
+  it("lists nothing for a placement that has ended", () => {
+    expect(score(placement({ status: "ENDED" })).upcoming).toEqual([]);
   });
 });
 
@@ -392,9 +477,8 @@ describe("escalation rules", () => {
         role: "ACCOUNT_DIRECTOR",
         contact: accountDirector,
       });
-      expect(action.reason).toBe(
-        "Nandini Rao, the account director, needs to hear that Aniket Kulkarni has 2 open issues at Lakeshore Architecture Studio.",
-      );
+      expect(action.callee).toBe("Nandini Rao");
+      expect(action.reason).toBe("2 issues are open on this placement.");
       // Open issues 50 plus escalation 60, clamped.
       expect(action.score).toBe(100);
       expect(result.health).toBe("RED");
@@ -419,10 +503,8 @@ describe("escalation rules", () => {
 
     it("goes to the account director, even once fixed", () => {
       const action = only(score(complaint(80, "FIXED")), "ESCALATION");
-      expect(action.escalation?.rule).toBe("TRIAL_CLIENT_COMPLAINT");
-      expect(action.reason).toBe(
-        "Nandini Rao, the account director, needs to hear that Lakeshore Architecture Studio raised a complaint on day 80 of the trial.",
-      );
+      expect(action.escalation).toMatchObject({ rule: "TRIAL_CLIENT_COMPLAINT", contact: accountDirector });
+      expect(action.reason).toBe("Lakeshore Architecture Studio raised a complaint on day 80 of the trial.");
     });
 
     it("does not trip after the trial or once closed", () => {
@@ -444,9 +526,7 @@ describe("escalation rules", () => {
       const action = only(score(attendancePair(12)), "ESCALATION");
       expect(action.escalation).toMatchObject({ rule: "REPEAT_ATTENDANCE", contact: deliveryManager });
       expect(action.issueId).toBe("issue-2");
-      expect(action.reason).toBe(
-        "Joel Santos, the delivery manager, needs to hear that Aniket Kulkarni had a second attendance issue 12 days after the one before.",
-      );
+      expect(action.reason).toBe("A second attendance issue came 12 days after the one before.");
     });
 
     it.each([
@@ -469,9 +549,7 @@ describe("escalation rules", () => {
       const result = redToday({ healthSnapshots: redOn(-1, -2, -3, -4, -5, -6) });
       const action = only(result, "ESCALATION");
       expect(action.escalation).toMatchObject({ rule: "RED_SEVEN_DAYS", contact: accountDirector });
-      expect(action.reason).toBe(
-        "Nandini Rao, the account director, needs to hear that Aniket Kulkarni's placement at Lakeshore Architecture Studio has been red for 7 days.",
-      );
+      expect(action.reason).toBe("This placement has been red for 7 days.");
     });
 
     it("does not trip at six days or across a gap", () => {
@@ -479,6 +557,11 @@ describe("escalation rules", () => {
         redToday({ healthSnapshots: snapshots }).actions.map((a) => a.type);
       expect(types(redOn(-1, -2, -3, -4, -5))).not.toContain("ESCALATION");
       expect(types(redOn(-1, -2, -4, -5, -6, -7))).not.toContain("ESCALATION");
+    });
+
+    it("ignores a snapshot for today", () => {
+      const types = redToday({ healthSnapshots: redOn(0, -1, -2, -3, -4, -5) }).actions.map((a) => a.type);
+      expect(types).not.toContain("ESCALATION");
     });
 
     it("clears once escalated during the current streak", () => {
@@ -497,9 +580,7 @@ describe("escalation rules", () => {
       );
       const action = only(result, "ESCALATION");
       expect(action.escalation).toMatchObject({ rule: "REPLACEMENT_REQUEST", contact: accountDirector });
-      expect(action.reason).toBe(
-        "Nandini Rao, the account director, needs to hear that Lakeshore Architecture Studio asked to replace Aniket Kulkarni.",
-      );
+      expect(action.reason).toBe("Lakeshore Architecture Studio asked for a replacement.");
     });
   });
 
@@ -528,6 +609,7 @@ describe("escalation rules", () => {
       const result = score(regressed("FIXED"));
       expect(pointsFor(result, "1 open issue")).toBe(25);
       expect(result.actions.map((a) => a.type)).not.toContain("ISSUE_FOLLOWUP");
+      expect(result.upcoming.map((item) => item.type)).not.toContain("ISSUE_FOLLOWUP");
     });
 
     it("goes to the delivery manager and floats to the top", () => {
@@ -535,9 +617,7 @@ describe("escalation rules", () => {
       const [first] = result.actions;
       expect(first.type).toBe("ESCALATION");
       expect(first.escalation).toMatchObject({ rule: "REGRESSED_FOLLOW_UP", contact: deliveryManager });
-      expect(first.reason).toBe(
-        "Joel Santos, the delivery manager, needs to hear that the attendance issue for Aniket Kulkarni came back at the 21-day check.",
-      );
+      expect(first.reason).toBe("The attendance issue came back at the 21-day check.");
       expect(first.score).toBe(25 + 60);
       expect(result.health).toBe("RED");
     });
@@ -554,15 +634,14 @@ describe("escalation rules", () => {
     });
   });
 
-  it("names the role when nobody holds it yet", () => {
+  it("names the role as the callee when nobody holds it yet", () => {
     const result = score(placement({ issues: [issue({ id: "issue-1", type: "REPLACEMENT_REQUEST" })] }), {
       contacts: [deliveryManager],
     });
     const action = only(result, "ESCALATION");
     expect(action.escalation?.contact).toBeNull();
-    expect(action.reason).toBe(
-      "The account director needs to hear that Lakeshore Architecture Studio asked to replace Aniket Kulkarni.",
-    );
+    expect(action.callee).toBe("the account director");
+    expect(action.reason).toBe("Lakeshore Architecture Studio asked for a replacement.");
   });
 });
 
@@ -586,6 +665,7 @@ describe("ranking", () => {
 describe("reason sentences", () => {
   const busy = [
     placement({ ...onDay(9), feedbackEntries: [] }),
+    placement({ ...onDay(0), feedbackEntries: [] }),
     placement({ feedbackEntries: [clientFeedback(-30)] }),
     placement({
       ...onDay(120),
@@ -593,6 +673,8 @@ describe("reason sentences", () => {
       checkIns: [
         { id: "check-in-1", party: "CLIENT", dueOn: date(-8), completedAt: null },
         { id: "check-in-2", party: "PROFESSIONAL", dueOn: date(-2), completedAt: null },
+        { id: "check-in-3", party: "CLIENT", dueOn: date(4), completedAt: null },
+        { id: "check-in-4", party: "PROFESSIONAL", dueOn: date(0), completedAt: null },
       ],
       issues: [
         issue({ id: "issue-1", type: "REPLACEMENT_REQUEST" }),
@@ -604,7 +686,10 @@ describe("reason sentences", () => {
           status: "FIXED",
           reportedBy: "PROFESSIONAL",
           reportedAt: at(-20),
-          followUps: [{ id: "follow-up-7", offsetDays: 7, dueAt: at(-5), checkedAt: null, outcome: null }],
+          followUps: [
+            { id: "follow-up-7", offsetDays: 7, dueAt: at(-5), checkedAt: null, outcome: null },
+            { id: "follow-up-21", offsetDays: 21, dueAt: at(9), checkedAt: null, outcome: null },
+          ],
         }),
         issue({
           id: "issue-5",
@@ -617,7 +702,9 @@ describe("reason sentences", () => {
       healthSnapshots: [-1, -2, -3, -4, -5, -6].map((offset) => ({ day: date(offset), status: "RED" as const })),
     }),
   ];
-  const actions = busy.flatMap((p) => score(p).actions);
+  const results = busy.map((p) => score(p));
+  const actions = results.flatMap((result) => result.actions);
+  const everything = results.flatMap((result) => [...result.actions, ...result.upcoming]);
 
   it("cover every action type and escalation rule", () => {
     expect(new Set(actions.map((a) => a.type))).toEqual(
@@ -626,15 +713,29 @@ describe("reason sentences", () => {
     expect(new Set(actions.map((a) => a.escalation?.rule).filter(Boolean))).toEqual(
       new Set(Object.keys(ESCALATION_ROUTES)),
     );
+    expect(new Set(everything.map((item) => item.callee))).toContain("Aniket Kulkarni");
   });
 
-  it("name who the call is to", () => {
-    for (const action of actions) expect(action.reason).toContain(action.callee);
+  it("name the client contact on client calls", () => {
+    for (const item of everything) {
+      if (item.type === "ESCALATION" || item.callee === "Aniket Kulkarni") continue;
+      expect(item.reason).toContain(item.callee);
+    }
+  });
+
+  it("leave an escalation's owner to the row's fourth line", () => {
+    for (const action of actions.filter((a) => a.type === "ESCALATION")) {
+      expect(action.reason).not.toMatch(/Nandini|Joel|director|manager/);
+    }
+  });
+
+  it("never name the professional", () => {
+    for (const item of everything) expect(item.reason).not.toMatch(/Aniket|Kulkarni/);
   });
 
   it("use no pronouns", () => {
     const pronouns = /\b(he|him|his|she|her|hers|they|them|their|theirs|it|its)\b/i;
-    for (const action of actions) expect(action.reason).not.toMatch(pronouns);
+    for (const item of everything) expect(item.reason).not.toMatch(pronouns);
   });
 });
 

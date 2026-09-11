@@ -107,13 +107,6 @@ triggers escalation.
 
 Monthly, tracked separately per party.
 
-### ActionLog
-`id, placementId, actionType (one of the action types below), performedAt, note?`
-
-Records that a call was made or an item dismissed, so the Today list clears
-as the day progresses and does not re-nag. An entry for an action type on
-today's Eastern day hides that action on that placement until tomorrow.
-
 ### EscalationContact
 `id, name, role (ACCOUNT_DIRECTOR | DELIVERY_MANAGER)`
 
@@ -133,7 +126,14 @@ pending again.
 `id, placementId, day, status (RED | AMBER | GREEN), score`
 
 One row per placement per Eastern day. Rule 4 needs health history, and
-current issue status cannot reconstruct what health was a week ago.
+current issue status cannot reconstruct what health was a week ago. The Today
+query records the day's row after the response is sent: rule 4 reads only
+yesterday and earlier, so today's row cannot change today's score, and the
+list does not wait on a write.
+
+There is no log of calls made. Every action on the Today list changes the
+record behind it — feedback, a follow-up outcome, a completed check-in, an
+escalation — and that change is what clears the row.
 
 ---
 
@@ -155,7 +155,7 @@ produce two actions; that is correct and expected.
 | `ISSUE_FOLLOWUP` | A follow-up window is due or overdue |
 | `FEEDBACK_DUE` | Scheduled feedback collection is due |
 | `NEW_PLACEMENT` | Placement is in days 1-14 and has no feedback yet |
-| `CHECKIN_DUE` | Monthly check-in is overdue |
+| `CHECKIN_DUE` | Monthly check-in is due today or overdue |
 
 ### Points
 
@@ -187,6 +187,7 @@ Last client sentiment <= 2
   +25
 
 Monthly check-in
+  due today                  +0
   overdue                   +10
   overdue by 7+ days        +20
 ```
@@ -243,9 +244,14 @@ The map lives in `lib/escalation-routes.ts`.
 
 ### Reason sentences
 
-Every reason names who the call is to — the client contact, the
-professional, or the escalation contact — and is built only from fields in
-the model. No pronouns: the model has no field that could supply one.
+Every reason is built only from fields in the model and uses no pronouns:
+the model has no field that could supply one. No reason names the
+professional, who is the heading of the row. A call to the client names the
+client contact ("Monthly check-in with Dana Whitfield is due today"); a call
+to the professional drops the name ("Monthly check-in is due Friday").
+Escalation reasons say only what happened ("2 issues are open on this
+placement") and leave the owner to the row's fourth line ("Two or more open
+issues — needs Nandini Rao.").
 
 ### Scoring decisions
 
@@ -262,10 +268,10 @@ implements, each with its reason.
 
 2. **Bands within a category are exclusive; categories add.** In silence,
    follow-ups and check-ins only the highest band counts — four days overdue
-   is +35, not +55. Each due follow-up and each overdue check-in is its own
-   action, but the placement score counts only the worst of each. *Why:* two
-   rows can each need a call, but one bad week should not count twice
-   toward health.
+   is +35, not +55. Each due follow-up and each check-in that is due or
+   overdue is its own action, but the placement score counts only the worst
+   of each. *Why:* two rows can each need a call, but one bad week should not
+   count twice toward health.
 
 3. **`dayIndex` is the day in the trial bands.** The start date is day 0 and
    takes the day 1-14 weight. `NEW_PLACEMENT` starts on day 1, as written.
@@ -285,9 +291,10 @@ implements, each with its reason.
    only on `FIXED` issues. Rules 2, 3 and 5 trip until the issue is
    `CLOSED`, so a trial complaint fixed the same day still reaches the
    account director. Rule 3 compares consecutive attendance issues on the
-   same placement, 30 days inclusive. A check-in fires from the day after it
-   was due. *Why:* fixed is not done — the issue model exists to say so —
-   and a check-in due today is not yet late.
+   same placement, 30 days inclusive. A check-in becomes an action on its
+   due day and adds no points until it is late; its row carries no severity
+   rule. *Why:* fixed is not done — the issue model exists to say so — and a
+   check-in due today is a call to make today, even though it is not late.
 
 6. **A regressed follow-up reopens its issue in scoring.** A `FIXED` issue
    with a `REGRESSED` follow-up is scored as `REGRESSED`: open, no further
@@ -304,17 +311,31 @@ implements, each with its reason.
    placement score.
 
 8. **Who the call is to.** Escalations go to the contact holding the rule's
-   role, or name the role if nobody holds it. Feedback and silence go to the
-   client contact. Check-ins go to whichever party is due. Follow-ups go to
-   the professional if the professional reported the issue, otherwise the
-   client contact. Full names, no pronouns. *Why:* a row that does not say
-   who to ring is a to-do, not a call.
+   role, or the role if nobody holds it; the row's fourth line names them and
+   the reason says only what happened. Feedback and silence go to the client
+   contact. Check-ins go to whichever party is due. Follow-ups go to the
+   professional if the professional reported the issue, otherwise the client
+   contact. The client contact is named in full; a call to the professional
+   drops the name, because the professional is the row's heading. No
+   pronouns. *Why:* a row that does not say who to ring is a to-do, not a
+   call, and a row that says the same name twice is noise.
+
+9. **What is coming up.** Alongside today's actions the engine lists what
+   falls due from tomorrow to 45 days out, if nothing is done first: client
+   feedback (the first day the silence reaches the cadence, judged at that
+   day's `dayIndex`), unchecked follow-up windows on fixed issues, and
+   uncompleted check-ins. "Later this week" shows the next six days, so a
+   weekday name always means one date; beyond that an item gives the date.
+   "Next up" on the clear state is the soonest item, so it never says
+   "today". *Why:* "You're clear today" must never be a blank screen, and
+   the collapsed group has to come from the same rules as the list above it.
 
 ---
 
 ## Screens
 
-Five. No more.
+Five at most; four are used. Logging happens on the row itself, not on a
+screen of its own.
 
 ### `/` — Today
 The default and the whole product. Three groups, in order, each with a quiet
@@ -329,28 +350,47 @@ label and its count:
 
 Each row follows the Today row in `DESIGN.md`: professional name, a context
 line (client, then where the placement sits in its life), the reason as a
-sentence naming who the call is to, and one action. No reason chips; days
+sentence (see "Reason sentences"), and one action. No reason chips; days
 since contact live inside the reason sentence. Not a table. Rows, readable at
 arm's length.
 
 A slim top bar carries only the date. No summary stat — the counts live on
 the group labels. Nothing else above the fold.
 
+Escalation rows carry the 3px alert rule. Call today rows carry the 2px watch
+rule when their placement is red or amber, and no rule when it is green; a
+check-in due today carries no rule whatever the placement's health. Later
+this week rows carry none. A group with nothing in it is not shown. The page
+renders per request, so the date and the list are always today's.
+
+### Logging from a row
+Each row's one action works in place. The moment it is logged the row
+collapses out and its group count drops. The server then re-reads and
+re-scores only that placement and sends its rows back, and the list swaps
+them in without a reload — the other placements have not changed, so the
+Today query is not run again. Reset and load demo data change everything, so
+they render the whole page again.
+
+- **Log feedback** — tap it, then tap a rating from 1 to 5. Two taps. It is
+  recorded as the client's feedback. This is the most frequent action in the
+  product; treat it that way.
+- **Log follow-up** — tap it, then "Still holding" or "Came back". Came back
+  reopens the issue and escalates it.
+- **Log check-in** — one tap.
+- **Mark escalated** — one tap. The server scores the placement again and
+  records the engine's reason and owner.
+
 ### `/placements` — List
 Filter by health, location, trial status. Search by name. Mobile: cards.
 
 ### `/placements/[id]` — Detail
 A timeline of everything on that placement: feedback, issues, follow-ups,
-check-ins, calls logged. Newest first. Health and score at the top with the
+check-ins, escalations. Newest first. Health and score at the top with the
 score's components itemised, so the number is never a black box.
 
 ### `/issues` — Open issues
 Grouped by status, follow-up windows visible with their due dates. This is
 where "fixed but not yet confirmed" lives.
-
-### Log feedback — modal, reachable from any row
-Party, sentiment 1-5, optional note. Two taps to complete. This is the most
-frequent action in the product; treat it that way.
 
 ---
 
@@ -368,7 +408,8 @@ Today row must be legible without zoom.
 - Empty (no placements) — explain what the tool is, offer to load demo data
 - Empty (nothing due) — "You're clear today", plus the next thing coming due
   and when. Never a blank screen.
-- Loading — skeleton rows matching final layout, no layout shift
+- Loading — none on first paint, and no skeleton. `/` is server-rendered with
+  its data, so there is no first-paint fetch for a skeleton to stand in for.
 - Error — what failed, a retry, and the last successful load's timestamp
 
 **Demo data reset.** A visible control that reseeds. Graders will click
@@ -406,7 +447,7 @@ seed to guarantee these cases exist:
 - Escalation contacts for both roles
 - 90 days of `HealthSnapshot` history, so rule 4 fires on at least one placement
 
-The seed is `lib/demo-data.ts`, run by `pnpm db:seed` and, later, the reset
+The seed is `lib/demo-data.ts`, run by `pnpm db:seed` and by the reset
 control. It is safe to rerun: one transaction deletes every row in every
 table and inserts the demo set, dated from the Eastern day it runs, so the
 situations never drift. Health history is not written by hand — the scoring
@@ -434,12 +475,12 @@ surface early, not at hour 70.
 ## Acceptance criteria
 
 - [ ] Cold load of `/` on 4G shows a populated list under five seconds
-- [ ] Every row states its reason in plain English, naming who the call is to, with no pronouns
+- [ ] Every row states its reason in plain English, with no pronouns
 - [ ] Escalation rows say which rule tripped and who it goes to
-- [ ] Logging feedback removes the row and updates the group count without reload
+- [ ] Logging from a row removes it and updates the group count without reload
 - [ ] Placement detail itemises the score
 - [ ] A regressed follow-up reopens its issue and escalates
-- [ ] All three empty/loading/error states reachable and deliberate
+- [ ] Both empty states and the error state are reachable and deliberate; there is no loading state on first paint
 - [ ] Usable one-handed on a phone
 - [ ] `pnpm typecheck` green across the workspace
 - [ ] No login on any graded URL

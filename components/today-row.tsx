@@ -1,4 +1,5 @@
-import type { Severity, TodayRowData } from "@/lib/today";
+import { RowAction } from "@/components/row-action";
+import type { PlacementRows, RowView, Severity } from "@/lib/today-view";
 
 const severityRule: Record<Severity, string | null> = {
   alert: "w-0.75 bg-alert",
@@ -6,38 +7,44 @@ const severityRule: Record<Severity, string | null> = {
   routine: null,
 };
 
-export function TodayRow({ row }: { row: TodayRowData }) {
+type TodayRowProps = {
+  row: RowView;
+  /** Logged and on its way out: collapses over 180ms, instantly with reduced motion. */
+  leaving: boolean;
+  onLeave: (rowKey: string) => void;
+  onSaved: (rows: PlacementRows) => void;
+};
+
+export function TodayRow({ row, leaving, onLeave, onSaved }: TodayRowProps) {
   const rule = severityRule[row.severity];
 
   return (
-    <li className="relative py-3 pl-4">
-      {rule && (
-        <span
-          aria-hidden="true"
-          className={`absolute inset-y-0 left-0 ${rule}`}
-        />
-      )}
+    <li
+      inert={leaving}
+      className={`grid transition-[grid-template-rows,opacity] duration-180 ease-out motion-reduce:transition-none ${
+        leaving ? "grid-rows-[0fr] opacity-0" : "grid-rows-[1fr]"
+      }`}
+    >
+      <div className="min-h-0 overflow-hidden">
+        <div className="relative mb-3 py-3 pl-4">
+          {rule && <span aria-hidden="true" className={`absolute inset-y-0 left-0 ${rule}`} />}
 
-      <h3 className="text-name text-chalk">{row.professional}</h3>
-      <p className="mt-0.5 text-context text-mute">{row.context}</p>
-      <p className="mt-2 text-pretty text-reason text-chalk">{row.reason}</p>
-      {row.escalation && (
-        // Non-breaking spaces keep the dash on the rule's line and
-        // "needs <owner>" together when this wraps at 360px. No text-pretty
-        // here: its rebalancing moves the break away from the dash.
-        <p className="mt-1 text-reason text-alert">
-          {`${row.escalation.rule}\u00a0— needs\u00a0${row.escalation.owner}.`}
-        </p>
-      )}
+          <h3 className="text-name text-chalk">{row.professional}</h3>
+          <p className="mt-0.5 text-context text-mute">{row.context}</p>
+          <p className="mt-2 text-pretty text-reason text-chalk">{row.reason}</p>
+          {row.escalationLine && (
+            // No text-pretty here: its rebalancing moves the break away from the dash.
+            <p className="mt-1 text-reason text-alert">{row.escalationLine}</p>
+          )}
 
-      <div className="mt-3 sm:flex sm:justify-end">
-        <button
-          type="button"
-          className="flex min-h-11 w-full items-center justify-center border border-line bg-slate px-5 text-action text-chalk active:bg-line sm:w-auto"
-        >
-          {row.action}
-          <span className="sr-only"> for {row.professional}</span>
-        </button>
+          <RowAction
+            rowKey={row.key}
+            action={row.action}
+            professional={row.professional}
+            onLeave={onLeave}
+            onSaved={onSaved}
+          />
+        </div>
       </div>
     </li>
   );

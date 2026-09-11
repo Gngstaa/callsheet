@@ -1,6 +1,4 @@
 import type {
-  ActionLog,
-  ActionType,
   CheckIn,
   Client,
   Escalation,
@@ -14,6 +12,7 @@ import type {
   IssueFollowUp,
   IssueStatus,
   IssueType,
+  Party,
   Placement,
   Professional,
 } from "@callsheet/db/types";
@@ -24,10 +23,19 @@ import { ESCALATION_ROUTES } from "@/lib/escalation-routes";
  * The scoring engine. SPEC.md, "The scoring engine", is the source of truth.
  *
  * Pure: takes a hydrated placement, the escalation contacts and an injected
- * reference instant, and returns the placement's score, health and today's
- * actions. No database access and no reading the clock, so a given input
- * always gives the same answer.
+ * reference instant, and returns the placement's score, health, today's
+ * actions and what falls due later. No database access and no reading the
+ * clock, so a given input always gives the same answer.
  */
+
+/** The kinds of action on the Today list. SPEC.md, "Action types". */
+export type ActionType =
+  | "ESCALATION"
+  | "SILENCE"
+  | "ISSUE_FOLLOWUP"
+  | "FEEDBACK_DUE"
+  | "NEW_PLACEMENT"
+  | "CHECKIN_DUE";
 
 // ---------------------------------------------------------------------------
 // Inputs
@@ -52,7 +60,6 @@ export type ScoringPlacement = Pick<Placement, "id" | "status" | "startDate"> & 
   >[];
   issues: readonly ScoringIssue[];
   checkIns: readonly Pick<CheckIn, "id" | "party" | "dueOn" | "completedAt">[];
-  actionLogs: readonly Pick<ActionLog, "actionType" | "performedAt">[];
   escalations: readonly Pick<Escalation, "rule" | "issueId" | "escalatedAt">[];
   healthSnapshots: readonly Pick<HealthSnapshot, "day" | "status">[];
 };
@@ -86,14 +93,38 @@ export type ScoredAction = {
   type: ActionType;
   placementId: string;
   score: number;
-  /** A sentence naming who the call is to. */
+  /**
+   * A sentence saying why. Client calls name the client contact; escalation
+   * reasons say only what happened, leaving the owner to the row's fourth
+   * line; no reason names the professional.
+   */
   reason: string;
-  /** Who the call is to, exactly as named in the reason. */
+  /** Who the call is to. */
   callee: string;
   issueId: string | null;
   followUpId: string | null;
   checkInId: string | null;
+  /** Follow-ups and check-ins: days past due, 0 when due today. Null otherwise. */
+  daysOverdue: number | null;
   escalation: EscalationDetail | null;
+};
+
+export type UpcomingItem = {
+  type: Extract<ActionType, "FEEDBACK_DUE" | "ISSUE_FOLLOWUP" | "CHECKIN_DUE">;
+  placementId: string;
+  /** Days from today, 1 or more. Anything due today is already an action. */
+  daysAway: number;
+  /** "tomorrow", a weekday within six days, otherwise "on 21 September". */
+  when: string;
+  /** What falls due, for the next-up line: "feedback", "client check-in", "21-day follow-up". */
+  what: string;
+  /** A sentence saying what falls due; names the client contact, never the professional. */
+  reason: string;
+  /** Who the call will be to. */
+  callee: string;
+  issueId: string | null;
+  followUpId: string | null;
+  checkInId: string | null;
 };
 
 export type PlacementScore = {
@@ -110,6 +141,8 @@ export type PlacementScore = {
   health: HealthStatus;
   /** Highest score first. Empty unless the placement is active. */
   actions: ScoredAction[];
+  /** Soonest first, up to UPCOMING_HORIZON_DAYS ahead. Empty unless the placement is active. */
+  upcoming: UpcomingItem[];
 };
 
 // ---------------------------------------------------------------------------
@@ -158,6 +191,9 @@ const REPEAT_ATTENDANCE_WINDOW_DAYS = 30;
 const RED_STREAK_DAYS = 7;
 const MAX_SCORE = 100;
 
+/** How far ahead the engine looks for what falls due. Covers every cadence and follow-up window. */
+export const UPCOMING_HORIZON_DAYS = 45;
+
 export function feedbackCadenceDays(dayIndex: number): number {
   if (dayIndex <= 30) return 7;
   if (dayIndex <= 90) return 14;
@@ -183,8 +219,11 @@ function followUpPoints(daysOverdue: number): number {
   return daysOverdue > 3 ? 35 : 20;
 }
 
+// Due today is a call to make, but only lateness adds points.
 function checkInPoints(daysOverdue: number): number {
-  return daysOverdue >= 7 ? 20 : 10;
+  if (daysOverdue >= 7) return 20;
+  if (daysOverdue >= 1) return 10;
+  return 0;
 }
 
 function clampScore(points: number): number {
@@ -201,6 +240,13 @@ const ACTION_ORDER: readonly ActionType[] = [
   "CHECKIN_DUE",
 ];
 
+const FEEDBACK_ACTIONS: ReadonlySet<ActionType> = new Set(["NEW_PLACEMENT", "SILENCE", "FEEDBACK_DUE"]);
+
+/** Position of an action type in SPEC.md's table, used to break ties. */
+export function actionOrder(type: ActionType): number {
+  return ACTION_ORDER.indexOf(type);
+}
+
 /** Highest score first; equal scores in SPEC.md's table order, escalation first. */
 export function compareActions(
   a: Pick<ScoredAction, "score" | "type">,
@@ -209,8 +255,18 @@ export function compareActions(
   return b.score - a.score || ACTION_ORDER.indexOf(a.type) - ACTION_ORDER.indexOf(b.type);
 }
 
+/** Soonest first; equal days in SPEC.md's table order. */
+export function compareUpcoming(
+  a: Pick<UpcomingItem, "daysAway" | "type">,
+  b: Pick<UpcomingItem, "daysAway" | "type">,
+): number {
+  return a.daysAway - b.daysAway || ACTION_ORDER.indexOf(a.type) - ACTION_ORDER.indexOf(b.type);
+}
+
 // ---------------------------------------------------------------------------
-// Words. Every sentence names who the call is to and uses no pronouns.
+// Words. No pronouns, and never the professional's name: the professional is
+// the heading of every row these sentences appear on. Escalation reasons do
+// not name the owner either; the row's fourth line does.
 
 const RULE_LABELS: Readonly<Record<EscalationRule, string>> = {
   TWO_OPEN_ISSUES: "Two or more open issues",
@@ -233,8 +289,33 @@ const ISSUE_PHRASES: Readonly<Record<IssueType, string>> = {
   REPLACEMENT_REQUEST: "the replacement request",
 };
 
+// 1 January 1970, day 0, was a Thursday.
+const WEEKDAYS_FROM_DAY_ZERO = [
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+] as const;
+
+const dayAndMonth = new Intl.DateTimeFormat("en-GB", {
+  day: "numeric",
+  month: "long",
+  timeZone: "UTC",
+});
+
+export function roleLabel(role: EscalationRole): string {
+  return ROLE_LABELS[role];
+}
+
 function days(count: number): string {
   return count === 1 ? "1 day" : `${count} days`;
+}
+
+function sentence(clause: string): string {
+  return `${clause.charAt(0).toUpperCase()}${clause.slice(1)}.`;
 }
 
 function cadencePhrase(cadenceDays: number): string {
@@ -242,6 +323,26 @@ function cadencePhrase(cadenceDays: number): string {
   if (cadenceDays === 14) return "every two weeks";
   if (cadenceDays === 30) return "every month";
   return `every ${days(cadenceDays)}`;
+}
+
+/** When something falls due, said out loud. Weekday names only within six days, so each names one date. */
+function dueWhen(dueDay: number, today: number): string {
+  const away = dueDay - today;
+  if (away === 0) return "today";
+  if (away === 1) return "tomorrow";
+  if (away < 7) return WEEKDAYS_FROM_DAY_ZERO[((dueDay % 7) + 7) % 7];
+  return `on ${dayAndMonth.format(dueDay * DAY_MS)}`;
+}
+
+/** A follow-up call goes to whoever reported the issue; the professional is not named twice. */
+function checkResolved(issue: ScoringIssue, contactName: string): string {
+  return issue.reportedBy === "PROFESSIONAL"
+    ? `Check that ${ISSUE_PHRASES[issue.type]} is still resolved.`
+    : `Check with ${contactName} that ${ISSUE_PHRASES[issue.type]} is still resolved.`;
+}
+
+function monthlyCheckIn(party: Party, contactName: string): string {
+  return party === "CLIENT" ? `Monthly check-in with ${contactName}` : "Monthly check-in";
 }
 
 // ---------------------------------------------------------------------------
@@ -287,16 +388,18 @@ type Candidate = Omit<ScoredAction, "placementId" | "score"> & {
   ownPoints: number;
 };
 
-type CandidateRefs = Partial<
-  Pick<ScoredAction, "issueId" | "followUpId" | "checkInId" | "escalation">
+type ActionRefs = Partial<
+  Pick<ScoredAction, "issueId" | "followUpId" | "checkInId" | "daysOverdue" | "escalation">
 >;
+
+type UpcomingRefs = Partial<Pick<UpcomingItem, "issueId" | "followUpId" | "checkInId">>;
 
 function candidate(
   type: ActionType,
   reason: string,
   callee: string,
   ownPoints: number,
-  refs: CandidateRefs = {},
+  refs: ActionRefs = {},
 ): Candidate {
   return {
     type,
@@ -306,7 +409,32 @@ function candidate(
     issueId: refs.issueId ?? null,
     followUpId: refs.followUpId ?? null,
     checkInId: refs.checkInId ?? null,
+    daysOverdue: refs.daysOverdue ?? null,
     escalation: refs.escalation ?? null,
+  };
+}
+
+function upcomingItem(
+  type: UpcomingItem["type"],
+  placementId: string,
+  daysAway: number,
+  when: string,
+  what: string,
+  reason: string,
+  callee: string,
+  refs: UpcomingRefs = {},
+): UpcomingItem {
+  return {
+    type,
+    placementId,
+    daysAway,
+    when,
+    what,
+    reason,
+    callee,
+    issueId: refs.issueId ?? null,
+    followUpId: refs.followUpId ?? null,
+    checkInId: refs.checkInId ?? null,
   };
 }
 
@@ -317,7 +445,7 @@ type Trip = {
   issueId: string | null;
   /** The Eastern day the rule tripped; an escalation on or after it counts. */
   trippedDay: number;
-  /** Finishes "… needs to hear that". */
+  /** What happened: the reason, before its capital and full stop. */
   clause: string;
 };
 
@@ -342,6 +470,7 @@ export function scorePlacement(
       components: [],
       health: "GREEN",
       actions: [],
+      upcoming: [],
     };
   }
 
@@ -370,6 +499,7 @@ export function scorePlacement(
   const openIssues = issues.filter(({ status }) => isOpen(status));
 
   const candidates: Candidate[] = [];
+  const upcoming: UpcomingItem[] = [];
 
   // Client feedback produces at most one action, and that action carries the
   // silence points: new placement first, then silence, then due today.
@@ -399,6 +529,34 @@ export function scorePlacement(
     );
   }
 
+  // When feedback falls due next, if it is not due or late already. The
+  // cadence is judged on the day in question, since it loosens as the
+  // placement ages. A placement on day 0 with no feedback is due from day 1.
+  if (!candidates.some((c) => FEEDBACK_ACTIONS.has(c.type))) {
+    let away: number | null = null;
+    if (lastClientFeedback) {
+      for (let d = 1; d <= UPCOMING_HORIZON_DAYS && away === null; d++) {
+        if (daysSinceClientFeedback + d >= feedbackCadenceDays(dayIndex + d)) away = d;
+      }
+    } else if (dayIndex === 0) {
+      away = 1;
+    }
+    if (away !== null) {
+      const when = dueWhen(today + away, today);
+      upcoming.push(
+        upcomingItem(
+          "FEEDBACK_DUE",
+          placement.id,
+          away,
+          when,
+          "feedback",
+          `Feedback from ${contactName} is due ${when}.`,
+          contactName,
+        ),
+      );
+    }
+  }
+
   // Follow-up windows on fixed issues. One action per window; the placement
   // score counts only the most overdue.
   let mostOverdueFollowUp = -1;
@@ -406,41 +564,81 @@ export function scorePlacement(
     if (status !== "FIXED") continue;
     for (const followUp of issue.followUps) {
       if (followUp.checkedAt) continue;
-      const overdue = today - operationalDay(followUp.dueAt);
-      if (overdue < 0) continue;
-      mostOverdueFollowUp = Math.max(mostOverdueFollowUp, overdue);
-
       const callee = issue.reportedBy === "PROFESSIONAL" ? professionalName : contactName;
+      const refs = { issueId: issue.id, followUpId: followUp.id };
+      const overdue = today - operationalDay(followUp.dueAt);
+
+      if (overdue < 0) {
+        if (-overdue <= UPCOMING_HORIZON_DAYS) {
+          const when = dueWhen(today - overdue, today);
+          upcoming.push(
+            upcomingItem(
+              "ISSUE_FOLLOWUP",
+              placement.id,
+              -overdue,
+              when,
+              `${followUp.offsetDays}-day follow-up`,
+              `${checkResolved(issue, contactName)} The ${followUp.offsetDays}-day check is due ${when}.`,
+              callee,
+              refs,
+            ),
+          );
+        }
+        continue;
+      }
+
+      mostOverdueFollowUp = Math.max(mostOverdueFollowUp, overdue);
       const when = overdue === 0 ? "is due today" : `was due ${days(overdue)} ago`;
       candidates.push(
         candidate(
           "ISSUE_FOLLOWUP",
-          `Check with ${callee} that ${ISSUE_PHRASES[issue.type]} is still resolved. The ${followUp.offsetDays}-day check ${when}.`,
+          `${checkResolved(issue, contactName)} The ${followUp.offsetDays}-day check ${when}.`,
           callee,
           followUpPoints(overdue),
-          { issueId: issue.id, followUpId: followUp.id },
+          { ...refs, daysOverdue: overdue },
         ),
       );
     }
   }
 
-  // Monthly check-ins, once past the due day. Same rule: one action each, the
-  // most overdue counts toward the placement.
+  // Monthly check-ins, from the due day. One action each; the most overdue
+  // counts toward the placement. A check-in due today is a call to make today
+  // but adds no points until it is late.
   let mostOverdueCheckIn = 0;
   for (const checkIn of placement.checkIns) {
     if (checkIn.completedAt) continue;
-    const overdue = today - calendarDay(checkIn.dueOn);
-    if (overdue < 1) continue;
-    mostOverdueCheckIn = Math.max(mostOverdueCheckIn, overdue);
-
     const callee = checkIn.party === "CLIENT" ? contactName : professionalName;
+    const refs = { checkInId: checkIn.id };
+    const overdue = today - calendarDay(checkIn.dueOn);
+
+    if (overdue < 0) {
+      if (-overdue <= UPCOMING_HORIZON_DAYS) {
+        const when = dueWhen(today - overdue, today);
+        upcoming.push(
+          upcomingItem(
+            "CHECKIN_DUE",
+            placement.id,
+            -overdue,
+            when,
+            checkIn.party === "CLIENT" ? "client check-in" : "check-in",
+            `${monthlyCheckIn(checkIn.party, contactName)} is due ${when}.`,
+            callee,
+            refs,
+          ),
+        );
+      }
+      continue;
+    }
+
+    mostOverdueCheckIn = Math.max(mostOverdueCheckIn, overdue);
+    const state = overdue === 0 ? "is due today" : `is ${days(overdue)} overdue`;
     candidates.push(
       candidate(
         "CHECKIN_DUE",
-        `Monthly check-in with ${callee} is ${days(overdue)} overdue.`,
+        `${monthlyCheckIn(checkIn.party, contactName)} ${state}.`,
         callee,
         checkInPoints(overdue),
-        { checkInId: checkIn.id },
+        { ...refs, daysOverdue: overdue },
       ),
     );
   }
@@ -454,7 +652,7 @@ export function scorePlacement(
       rule: "TWO_OPEN_ISSUES",
       issueId: null,
       trippedDay: Math.max(...openIssues.map(({ issue, status }) => openedDay(issue, status))),
-      clause: `${professionalName} has ${openIssues.length} open issues at ${clientName}`,
+      clause: `${openIssues.length} issues are open on this placement`,
     });
   }
 
@@ -487,7 +685,7 @@ export function scorePlacement(
       rule: "REPEAT_ATTENDANCE",
       issueId: current.issue.id,
       trippedDay: currentDay,
-      clause: `${professionalName} had a second attendance issue ${when}`,
+      clause: `a second attendance issue came ${when}`,
     });
   }
 
@@ -498,7 +696,7 @@ export function scorePlacement(
       rule: "REPLACEMENT_REQUEST",
       issueId: issue.id,
       trippedDay: operationalDay(issue.reportedAt),
-      clause: `${clientName} asked to replace ${professionalName}`,
+      clause: `${clientName} asked for a replacement`,
     });
   }
 
@@ -511,7 +709,7 @@ export function scorePlacement(
       rule: "REGRESSED_FOLLOW_UP",
       issueId: issue.id,
       trippedDay: operationalDay(regression.checkedAt),
-      clause: `${ISSUE_PHRASES[issue.type]} for ${professionalName} came back at the ${regression.offsetDays}-day check`,
+      clause: `${ISSUE_PHRASES[issue.type]} came back at the ${regression.offsetDays}-day check`,
     });
   }
 
@@ -529,7 +727,7 @@ export function scorePlacement(
   const sentimentPoints =
     lastClientFeedback && lastClientFeedback.sentiment <= LOW_SENTIMENT ? LOW_SENTIMENT_POINTS : 0;
   const worstFollowUpPoints = mostOverdueFollowUp >= 0 ? followUpPoints(mostOverdueFollowUp) : 0;
-  const worstCheckInPoints = mostOverdueCheckIn > 0 ? checkInPoints(mostOverdueCheckIn) : 0;
+  const worstCheckInPoints = checkInPoints(mostOverdueCheckIn);
   const basePoints =
     trial +
     feedbackPoints +
@@ -547,7 +745,8 @@ export function scorePlacement(
 
   // 4. Red for seven Eastern days running: today, judged without this rule so
   // it cannot keep itself red, plus the six snapshots before it. A new streak
-  // after a break trips it again.
+  // after a break trips it again. Only yesterday and earlier are read, so
+  // today's snapshot does not affect today's score.
   if (healthFor(trips.some((trip) => !isEscalated(trip))) === "RED") {
     const redDays = new Set(
       placement.healthSnapshots
@@ -562,7 +761,7 @@ export function scorePlacement(
         rule: "RED_SEVEN_DAYS",
         issueId: null,
         trippedDay: streakStart,
-        clause: `${professionalName}'s placement at ${clientName} has been red for ${days(streak)}`,
+        clause: `this placement has been red for ${days(streak)}`,
       });
     }
   }
@@ -573,15 +772,17 @@ export function scorePlacement(
   for (const trip of pending) {
     const role = ESCALATION_ROUTES[trip.rule];
     const contact = context.contacts.find((c) => c.role === role) ?? null;
-    const roleLabel = ROLE_LABELS[role];
-    const reason = contact
-      ? `${contact.name}, the ${roleLabel}, needs to hear that ${trip.clause}.`
-      : `The ${roleLabel} needs to hear that ${trip.clause}.`;
     candidates.push(
-      candidate("ESCALATION", reason, contact ? contact.name : `the ${roleLabel}`, ESCALATION_POINTS, {
-        issueId: trip.issueId,
-        escalation: { rule: trip.rule, ruleLabel: RULE_LABELS[trip.rule], role, contact },
-      }),
+      candidate(
+        "ESCALATION",
+        sentence(trip.clause),
+        contact ? contact.name : `the ${ROLE_LABELS[role]}`,
+        ESCALATION_POINTS,
+        {
+          issueId: trip.issueId,
+          escalation: { rule: trip.rule, ruleLabel: RULE_LABELS[trip.rule], role, contact },
+        },
+      ),
     );
   }
 
@@ -631,23 +832,17 @@ export function scorePlacement(
   // Trial weight, open issues and a low rating apply to every action on the
   // placement; each action adds only its own points on top.
   const contextPoints = trial + openIssuePoints + sentimentPoints;
-  const loggedToday = new Set(
-    placement.actionLogs
-      .filter((log) => operationalDay(log.performedAt) === today)
-      .map((log) => log.actionType),
-  );
+  const active = placement.status === "ACTIVE";
 
-  const actions: ScoredAction[] =
-    placement.status === "ACTIVE"
-      ? candidates
-          .filter((c) => !loggedToday.has(c.type))
-          .map(({ ownPoints, ...rest }) => ({
-            ...rest,
-            placementId: placement.id,
-            score: clampScore(contextPoints + ownPoints),
-          }))
-          .sort(compareActions)
-      : [];
+  const actions: ScoredAction[] = active
+    ? candidates
+        .map(({ ownPoints, ...rest }) => ({
+          ...rest,
+          placementId: placement.id,
+          score: clampScore(contextPoints + ownPoints),
+        }))
+        .sort(compareActions)
+    : [];
 
   return {
     placementId: placement.id,
@@ -660,5 +855,6 @@ export function scorePlacement(
     components,
     health: healthFor(escalationPending),
     actions,
+    upcoming: active ? upcoming.sort(compareUpcoming) : [],
   };
 }

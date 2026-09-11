@@ -2,13 +2,16 @@ import type { RecordHealthSnapshotInput } from "@callsheet/db/types";
 
 import {
   compareActions,
+  compareUpcoming,
   operationalDay,
   scorePlacement,
   type PlacementScore,
   type ScoredAction,
   type ScoringContact,
   type ScoringPlacement,
+  type UpcomingItem,
 } from "@/lib/scoring";
+import { timedSync } from "@/lib/server-timing";
 
 const DAY_MS = 86_400_000;
 
@@ -19,23 +22,33 @@ export type TodayRepositories<P extends ScoringPlacement> = {
   recordHealthSnapshots(snapshots: readonly RecordHealthSnapshotInput[]): Promise<unknown>;
 };
 
+export type TodayOptions = {
+  /** Runs work after the response is sent. Next's after() in production. */
+  defer(task: () => Promise<void>): void;
+};
+
 export type TodayResult<P extends ScoringPlacement> = {
   /** The Eastern day number this list is for. */
   day: number;
   placements: { placement: P; score: PlacementScore }[];
   /** Every action on every placement, highest score first. */
   actions: ScoredAction[];
+  /** Everything falling due later on every placement, soonest first. */
+  upcoming: UpcomingItem[];
 };
 
 /**
  * The Today query. Scores every active placement for the reference date and
- * records each one's health for that Eastern day before returning, so rule 4
- * builds its history from ordinary use. Reading twice in a day replaces that
- * day's snapshot rather than adding one.
+ * hands back the list straight away. Recording each placement's health for
+ * the day is deferred until after the response: rule 4 reads only yesterday
+ * and earlier, so today's snapshot cannot change today's score, and the list
+ * should not wait on a write. Reading twice in a day replaces that day's
+ * snapshot rather than adding one.
  */
 export async function runTodayQuery<P extends ScoringPlacement>(
   referenceDate: Date,
   repositories: TodayRepositories<P>,
+  options: TodayOptions,
 ): Promise<TodayResult<P>> {
   const [placements, contacts] = await Promise.all([
     repositories.findActivePlacements(),
@@ -43,23 +56,27 @@ export async function runTodayQuery<P extends ScoringPlacement>(
   ]);
   const day = operationalDay(referenceDate);
 
-  const scored = placements.map((placement) => ({
-    placement,
-    score: scorePlacement(placement, { referenceDate, contacts }),
-  }));
-
-  await repositories.recordHealthSnapshots(
-    scored.map(({ placement, score }) => ({
-      placementId: placement.id,
-      day: new Date(day * DAY_MS),
-      status: score.health,
-      score: score.score,
+  const scored = timedSync("today: scoring", () =>
+    placements.map((placement) => ({
+      placement,
+      score: scorePlacement(placement, { referenceDate, contacts }),
     })),
   );
+
+  const snapshots = scored.map(({ placement, score }) => ({
+    placementId: placement.id,
+    day: new Date(day * DAY_MS),
+    status: score.health,
+    score: score.score,
+  }));
+  options.defer(async () => {
+    await repositories.recordHealthSnapshots(snapshots);
+  });
 
   return {
     day,
     placements: scored,
     actions: scored.flatMap(({ score }) => score.actions).sort(compareActions),
+    upcoming: scored.flatMap(({ score }) => score.upcoming).sort(compareUpcoming),
   };
 }

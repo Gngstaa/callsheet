@@ -194,7 +194,6 @@ describe("rebuilding the demo data", () => {
       data.issues,
       data.issueFollowUps,
       data.checkIns,
-      data.actionLogs,
       data.escalations,
       data.healthSnapshots,
     ];
@@ -217,7 +216,6 @@ describe("rebuilding the demo data", () => {
       ...data.feedbackEntries,
       ...data.issues,
       ...data.checkIns,
-      ...data.actionLogs,
       ...data.escalations,
       ...data.healthSnapshots,
     ];

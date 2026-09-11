@@ -1,5 +1,4 @@
 import type {
-  ActionLog,
   CheckIn,
   Client,
   Escalation,
@@ -62,7 +61,6 @@ export type DemoDataset = {
   issues: Issue[];
   issueFollowUps: IssueFollowUp[];
   checkIns: CheckIn[];
-  actionLogs: ActionLog[];
   escalations: Escalation[];
   healthSnapshots: HealthSnapshot[];
 };
@@ -228,7 +226,7 @@ const PLACEMENTS: readonly PlacementSpec[] = [
         issueKey: "missed-shift",
         escalatedDaysAgo: 8,
         reason:
-          "Vikram Iyer, the delivery manager, needs to hear that Ketan Parmar had a second attendance issue 17 days after the one before.",
+          "A second attendance issue came 17 days after the one before.",
       },
     ],
   },
@@ -719,7 +717,6 @@ function baseDataFor(today: number): Omit<DemoDataset, "healthSnapshots"> {
     issues: [],
     issueFollowUps: [],
     checkIns: [],
-    actionLogs: [],
     escalations: [],
   };
   const firstStartByClient = new Map<string, number>();
@@ -800,7 +797,6 @@ type PlacementRecord = {
   issues: Issue[];
   followUps: IssueFollowUp[];
   checkIns: CheckIn[];
-  actionLogs: ActionLog[];
   escalations: Escalation[];
 };
 
@@ -821,7 +817,6 @@ function recordsFrom(data: Omit<DemoDataset, "healthSnapshots">): PlacementRecor
   const issues = groupBy(data.issues, (issue) => issue.placementId);
   const followUps = groupBy(data.issueFollowUps, (followUp) => followUp.issueId);
   const checkIns = groupBy(data.checkIns, (checkIn) => checkIn.placementId);
-  const actionLogs = groupBy(data.actionLogs, (log) => log.placementId);
   const escalations = groupBy(data.escalations, (escalation) => escalation.placementId);
 
   return data.placements.map((placement) => {
@@ -837,7 +832,6 @@ function recordsFrom(data: Omit<DemoDataset, "healthSnapshots">): PlacementRecor
       issues: placementIssues,
       followUps: placementIssues.flatMap((issue) => followUps.get(issue.id) ?? []),
       checkIns: checkIns.get(placement.id) ?? [],
-      actionLogs: actionLogs.get(placement.id) ?? [],
       escalations: escalations.get(placement.id) ?? [],
     };
   });
@@ -877,7 +871,6 @@ function placementOn(
         ? { ...checkIn, completedAt: null }
         : checkIn,
     ),
-    actionLogs: record.actionLogs.filter((log) => happenedBy(log.performedAt, day)),
     escalations: record.escalations.filter((escalation) => happenedBy(escalation.escalatedAt, day)),
     healthSnapshots,
   };
