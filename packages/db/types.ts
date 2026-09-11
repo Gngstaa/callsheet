@@ -2,8 +2,6 @@
 // model types without importing anything that touches the database.
 
 export type {
-  ActionLog,
-  ActionType,
   CheckIn,
   Client,
   Escalation,

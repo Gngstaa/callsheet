@@ -10,7 +10,6 @@ export type DemoDataInput = {
   issues: readonly Prisma.IssueCreateManyInput[];
   issueFollowUps: readonly Prisma.IssueFollowUpCreateManyInput[];
   checkIns: readonly Prisma.CheckInCreateManyInput[];
-  actionLogs: readonly Prisma.ActionLogCreateManyInput[];
   escalations: readonly Prisma.EscalationCreateManyInput[];
   healthSnapshots: readonly Prisma.HealthSnapshotCreateManyInput[];
 };
@@ -25,18 +24,11 @@ export const demoDataRepository = {
   replaceAll(data: DemoDataInput) {
     return db().$transaction(
       async (tx) => {
-        // Children before parents.
-        await tx.healthSnapshot.deleteMany();
-        await tx.escalation.deleteMany();
-        await tx.actionLog.deleteMany();
-        await tx.checkIn.deleteMany();
-        await tx.issueFollowUp.deleteMany();
-        await tx.issue.deleteMany();
-        await tx.feedbackEntry.deleteMany();
-        await tx.placement.deleteMany();
-        await tx.professional.deleteMany();
-        await tx.client.deleteMany();
-        await tx.escalationContact.deleteMany();
+        // One statement rather than a delete per table: every statement in
+        // this transaction is its own round trip. CASCADE also empties any
+        // table that still references these, such as one a pending migration
+        // has yet to drop. Table names must follow schema.prisma.
+        await tx.$executeRaw`TRUNCATE TABLE "HealthSnapshot", "Escalation", "CheckIn", "IssueFollowUp", "Issue", "FeedbackEntry", "Placement", "Professional", "Client", "EscalationContact" CASCADE`;
 
         // Parents before children.
         await tx.escalationContact.createMany({ data: [...data.escalationContacts] });
@@ -47,7 +39,6 @@ export const demoDataRepository = {
         await tx.issue.createMany({ data: [...data.issues] });
         await tx.issueFollowUp.createMany({ data: [...data.issueFollowUps] });
         await tx.checkIn.createMany({ data: [...data.checkIns] });
-        await tx.actionLog.createMany({ data: [...data.actionLogs] });
         await tx.escalation.createMany({ data: [...data.escalations] });
         await tx.healthSnapshot.createMany({ data: [...data.healthSnapshots] });
       },

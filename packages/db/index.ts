@@ -1,8 +1,4 @@
 export { db } from "./client";
-export {
-  actionLogRepository,
-  type LogActionInput,
-} from "./repositories/action-log.repository";
 export { checkInRepository } from "./repositories/check-in.repository";
 export {
   demoDataRepository,

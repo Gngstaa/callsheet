@@ -26,9 +26,13 @@ export const healthSnapshotRepository = {
     return upsertSnapshot(db(), snapshot);
   },
 
-  /** Records a batch in one transaction. The Today query calls this on every read. */
+  /**
+   * Records a batch, as the Today query does on every read. Each row stands
+   * alone, so they are written side by side rather than in one transaction:
+   * against a distant database the batch transaction failed with P2028.
+   */
   recordMany(snapshots: readonly RecordHealthSnapshotInput[]) {
     const client = db();
-    return client.$transaction(snapshots.map((snapshot) => upsertSnapshot(client, snapshot)));
+    return Promise.all(snapshots.map((snapshot) => upsertSnapshot(client, snapshot)));
   },
 };

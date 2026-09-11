@@ -6,6 +6,10 @@ const DAY_MS = 86_400_000;
 /** Follow-up windows, in days after the fix. SPEC.md, "IssueFollowUp". */
 export const FOLLOW_UP_OFFSET_DAYS = [7, 21, 45] as const;
 
+// Prisma's defaults (2s to start, 5s to finish) are too tight for a database
+// that is far away or waking from suspend.
+const TRANSACTION_LIMITS = { maxWait: 10_000, timeout: 20_000 };
+
 export const issueRepository = {
   /**
    * Records that a fix was applied and schedules the 7, 21 and 45-day checks
@@ -26,12 +30,13 @@ export const issueRepository = {
         })),
       });
       return issue;
-    });
+    }, TRANSACTION_LIMITS);
   },
 
   /**
    * Records a follow-up result. REGRESSED flips the issue back to REGRESSED,
    * which scoring escalates. The issue closes once every window has held.
+   * Returns the follow-up with its issue's placement id.
    */
   recordFollowUpOutcome(
     followUpId: string,
@@ -42,6 +47,7 @@ export const issueRepository = {
       const followUp = await tx.issueFollowUp.update({
         where: { id: followUpId },
         data: { outcome, checkedAt },
+        include: { issue: { select: { placementId: true } } },
       });
 
       if (outcome === "REGRESSED") {
@@ -65,6 +71,6 @@ export const issueRepository = {
         });
       }
       return followUp;
-    });
+    }, TRANSACTION_LIMITS);
   },
 };

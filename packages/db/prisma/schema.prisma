@@ -70,15 +70,6 @@ enum FollowUpOutcome {
   REGRESSED
 }
 
-enum ActionType {
-  ESCALATION
-  SILENCE
-  ISSUE_FOLLOWUP
-  FEEDBACK_DUE
-  NEW_PLACEMENT
-  CHECKIN_DUE
-}
-
 enum HealthStatus {
   RED
   AMBER
@@ -133,7 +124,6 @@ model Placement {
   feedbackEntries FeedbackEntry[]
   issues          Issue[]
   checkIns        CheckIn[]
-  actionLogs      ActionLog[]
   escalations     Escalation[]
   healthSnapshots HealthSnapshot[]
 
@@ -198,18 +188,6 @@ model CheckIn {
   placement Placement @relation(fields: [placementId], references: [id], onDelete: Cascade)
 
   @@unique([placementId, party, dueOn])
-}
-
-model ActionLog {
-  id          String     @id @default(cuid())
-  placementId String
-  actionType  ActionType
-  performedAt DateTime   @db.Timestamptz(3)
-  note        String?
-
-  placement Placement @relation(fields: [placementId], references: [id], onDelete: Cascade)
-
-  @@index([placementId, performedAt])
 }
 
 model EscalationContact {
