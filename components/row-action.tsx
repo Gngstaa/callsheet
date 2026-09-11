@@ -67,11 +67,11 @@ export function RowAction({ rowKey, action, professional, onLeave, onSaved }: Ro
 
   if (choosing && action.kind === "feedback") {
     return (
-      <fieldset className="mt-3" disabled={isPending}>
+      <fieldset className="mt-3 sm:mt-2" disabled={isPending}>
         <legend className="text-context text-mute">
           How is {action.contactName} finding it? 1 is unhappy, 5 is delighted.
         </legend>
-        <div className="mt-2 grid grid-cols-5 gap-2">
+        <div className="mt-2 grid grid-cols-5 gap-2 sm:max-w-sm">
           {[1, 2, 3, 4, 5].map((sentiment) => (
             <button
               key={sentiment}
@@ -93,9 +93,9 @@ export function RowAction({ rowKey, action, professional, onLeave, onSaved }: Ro
 
   if (choosing && action.kind === "followUp") {
     return (
-      <fieldset className="mt-3" disabled={isPending}>
+      <fieldset className="mt-3 sm:mt-2" disabled={isPending}>
         <legend className="text-context text-mute">Is the fix still holding?</legend>
-        <div className="mt-2 grid grid-cols-2 gap-2">
+        <div className="mt-2 grid grid-cols-2 gap-2 sm:max-w-sm">
           <button
             type="button"
             className={choiceClass}
@@ -119,9 +119,11 @@ export function RowAction({ rowKey, action, professional, onLeave, onSaved }: Ro
     );
   }
 
+  // Left-aligned under the reason on every width, so the action stays next to
+  // the row it belongs to.
   return (
-    <div className="mt-3">
-      <div className="sm:flex sm:justify-end">
+    <div className="mt-3 sm:mt-2">
+      <div className="sm:flex">
         <button type="button" className={buttonClass} disabled={isPending} onClick={start}>
           {LABELS[action.kind]}
           <span className="sr-only"> for {professional}</span>

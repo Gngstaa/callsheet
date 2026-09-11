@@ -26,12 +26,13 @@ export function TodayRow({ row, leaving, onLeave, onSaved }: TodayRowProps) {
       }`}
     >
       <div className="min-h-0 overflow-hidden">
-        <div className="relative mb-3 py-3 pl-4">
+        {/* sm: spacing is tighter on wider screens, where more rows fit above the fold. */}
+        <div className="relative mb-3 py-3 pl-4 sm:mb-2 sm:py-1.5">
           {rule && <span aria-hidden="true" className={`absolute inset-y-0 left-0 ${rule}`} />}
 
           <h3 className="text-name text-chalk">{row.professional}</h3>
           <p className="mt-0.5 text-context text-mute">{row.context}</p>
-          <p className="mt-2 text-pretty text-reason text-chalk">{row.reason}</p>
+          <p className="mt-2 text-pretty text-reason text-chalk sm:mt-1">{row.reason}</p>
           {row.escalationLine && (
             // No text-pretty here: its rebalancing moves the break away from the dash.
             <p className="mt-1 text-reason text-alert">{row.escalationLine}</p>

@@ -10,9 +10,10 @@ type TodayGroupProps = {
   onSaved: (rows: PlacementRows) => void;
 };
 
-// top-10 keeps the label stuck directly under the 40px date bar.
+// top-10 keeps the label stuck directly under the 40px date bar. A little
+// shorter from sm up, where more rows fit above the fold.
 const labelBar =
-  "sticky top-10 z-10 flex min-h-11 items-center gap-2 border-t border-line bg-ink text-label text-mute";
+  "sticky top-10 z-10 flex min-h-11 items-center gap-2 border-t border-line bg-ink text-label text-mute sm:min-h-10";
 
 function RowList({ rows, leaving, onLeave, onSaved }: Omit<TodayGroupProps, "id" | "label">) {
   return (

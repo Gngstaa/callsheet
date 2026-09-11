@@ -45,14 +45,14 @@ export default async function TodayPage() {
   return (
     <>
       <header className="sticky top-0 z-20 h-10 bg-slate">
-        <div className="mx-auto flex h-full max-w-2xl items-center px-4">
+        <div className="mx-auto flex h-full max-w-180 items-center px-4">
           <time dateTime={isoDate.format(now)} className="text-label text-mute">
             {dateLabel.format(now)}
           </time>
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-2xl px-4 pb-16 tabular-nums">
+      <main className="mx-auto w-full max-w-180 px-4 pb-16 tabular-nums">
         <h1 className="sr-only">Today</h1>
 
         {view === null ? (
